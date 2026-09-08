@@ -39,7 +39,8 @@ def safe_mode_banner():
 
 def render_score_breakdown(breakdown: dict, total: int, reason: str):
     st.markdown(f"#### Fit score: **{total}/100**")
-    for label, (value, maxv) in breakdown.items():
+    for label, pair in breakdown.items():
+        value, maxv = pair
         st.progress(value / maxv if maxv else 0, text=f"{label} — {value}/{maxv}")
     if reason:
         st.markdown(f'<div class="po-muted">💬 {reason}</div>', unsafe_allow_html=True)

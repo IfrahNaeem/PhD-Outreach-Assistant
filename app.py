@@ -1,25 +1,74 @@
 """
-app.py — PhD Outreach Assistant (Streamlit)
+app.py — PhD Outreach Assistant (multi-user, persistent, rich-text version)
 
 Run with: streamlit run app.py
 
-Helps a prospective PhD applicant find and email professors: research each
-professor, score how good a fit they look like, generate a personalized
-supervision-inquiry email (with your CV attached), and only send after your
-explicit approval — same Safe Mode principle as before, just for a
-different kind of "lead."
+Requires these secrets to be configured (Streamlit Cloud: Settings -> Secrets,
+or locally in .streamlit/secrets.toml):
+
+    DATABASE_URL = "postgresql://...supabase connection string..."
+    GOOGLE_CLIENT_CONFIG = '''{"installed": {...contents of your client_secret.json...}}'''
 """
 
 import pandas as pd
 import streamlit as st
+from streamlit_quill import st_quill
 
 import db
+import auth
 import ai_engine
 import gmail_client
 import ui_helpers as ui
 
 st.set_page_config(page_title="PhD Outreach Assistant", page_icon="🎓", layout="centered")
 ui.inject_minimal_css()
+
+
+# =============================================================================
+# LOGIN GATE — nothing below this runs until someone is signed in
+# =============================================================================
+if not auth.is_logged_in():
+    st.markdown("## 🎓 PhD Outreach Assistant")
+    st.caption("Find professors. Personalize outreach. Land a supervisor.")
+    st.write("")
+
+    tab_signin, tab_signup = st.tabs(["Sign In", "Sign Up"])
+
+    with tab_signin:
+        with st.form("signin_form"):
+            email = st.text_input("Email")
+            password = st.text_input("Password", type="password")
+            submitted = st.form_submit_button("Sign In", type="primary")
+        if submitted:
+            ok, user_id = auth.sign_in(email, password)
+            if ok:
+                auth.log_in_session(user_id, email.strip().lower())
+                st.rerun()
+            else:
+                st.error("Incorrect email or password.")
+
+    with tab_signup:
+        with st.form("signup_form"):
+            new_email = st.text_input("Email", key="signup_email")
+            new_password = st.text_input("Password (min 8 characters)", type="password", key="signup_pw")
+            confirm_password = st.text_input("Confirm password", type="password", key="signup_pw2")
+            submitted2 = st.form_submit_button("Create Account", type="primary")
+        if submitted2:
+            ok, result = auth.sign_up(new_email, new_password, confirm_password)
+            if ok:
+                auth.log_in_session(result, new_email.strip().lower())
+                st.success("Account created!")
+                st.rerun()
+            else:
+                st.error(result)
+
+    st.stop()  # nothing past this point renders for a logged-out visitor
+
+
+# =============================================================================
+# LOGGED IN — normal app
+# =============================================================================
+user_id = auth.current_user_id()
 
 PAGES = [
     "⚙️ Setup",
@@ -33,12 +82,16 @@ PAGES = [
 
 with st.sidebar:
     st.markdown("### 🎓 PhD Outreach Assistant")
-    st.caption("Find professors. Personalize outreach. Land a supervisor.")
+    st.caption(f"Signed in as {auth.current_user_email()}")
     page = st.radio("Navigate", PAGES, label_visibility="collapsed")
     st.divider()
     st.caption("🛡️ Safe Mode: nothing sends without your approval.")
     st.caption("🟢 AI connected" if ai_engine.is_connected() else "⚪ AI not connected yet")
-    st.caption("🟢 Gmail connected" if gmail_client.is_connected() else "⚪ Gmail not connected yet")
+    st.caption("🟢 Gmail connected" if gmail_client.is_connected(user_id) else "⚪ Gmail not connected yet")
+    st.divider()
+    if st.button("Log out"):
+        auth.log_out()
+        st.rerun()
 
 
 # =============================================================================
@@ -60,56 +113,44 @@ if page == "⚙️ Setup":
             (st.success if ok else st.error)(msg)
 
     with st.container(border=True):
-        st.markdown("#### 2. Connect Gmail (for real email sending)")
-        st.caption(
-            "Optional. Without this, approved emails just change status to SENT without actually "
-            "being emailed."
-        )
-        if gmail_client.is_connected():
+        st.markdown("#### 2. Connect Gmail")
+        st.caption("Once connected, it stays connected for your account — no need to redo this every session.")
+        if not gmail_client.is_configured():
+            st.warning("Gmail sending isn't set up for this app yet — the app owner needs to add "
+                       "GOOGLE_CLIENT_CONFIG in Secrets.")
+        elif gmail_client.is_connected(user_id):
             st.success("🟢 Gmail is connected.")
             if st.button("Disconnect Gmail"):
-                gmail_client.disconnect()
+                gmail_client.disconnect(user_id)
                 st.rerun()
         else:
-            st.caption(
-                "You'll need a `client_secret.json` from your own Google Cloud project "
-                "(OAuth client type: Desktop app, scope: gmail.send)."
-            )
-            secret_file = st.file_uploader("Upload client_secret.json", type=["json"])
-            if secret_file is not None:
-                ok, msg = gmail_client.set_client_config(secret_file)
-                (st.success if ok else st.error)(msg)
+            st.markdown("**Step 1 — Get your sign-in link**")
+            if st.button("Get Sign-in Link", type="primary"):
+                ok, msg, url = gmail_client.start_signin()
+                if ok:
+                    st.session_state["gmail_auth_url"] = url
+                else:
+                    st.error(msg)
 
-            if gmail_client.has_client_config():
-                st.divider()
-                st.markdown("**Step 1 — Get your sign-in link**")
-                if st.button("Get Sign-in Link", type="primary"):
-                    ok, msg, url = gmail_client.start_signin()
+            if st.session_state.get("gmail_auth_url"):
+                st.markdown(f"👉 **[Click here to sign in with Google]({st.session_state['gmail_auth_url']})**")
+                st.caption(
+                    "After logging in and clicking Allow, Google sends you to a page that fails "
+                    "to load — that's expected. Copy the full URL from your address bar (it will "
+                    "contain `code=...`) and paste it below."
+                )
+                st.markdown("**Step 2 — Paste it back here**")
+                pasted = st.text_input("Paste the URL from your address bar", key="gmail_pasted_url")
+                if st.button("Complete Connection", type="primary"):
+                    ok, msg = gmail_client.complete_signin(user_id, pasted)
+                    (st.success if ok else st.error)(msg)
                     if ok:
-                        st.session_state["gmail_auth_url"] = url
-                    else:
-                        st.error(msg)
-
-                if st.session_state.get("gmail_auth_url"):
-                    st.markdown(f"👉 **[Click here to sign in with Google]({st.session_state['gmail_auth_url']})**")
-                    st.caption(
-                        "After logging in and clicking Allow, Google sends you to a page that fails "
-                        "to load — that's expected. Copy the full URL from your address bar (it will "
-                        "contain `code=...`) and paste it below."
-                    )
-                    st.markdown("**Step 2 — Paste it back here**")
-                    pasted = st.text_input("Paste the URL from your address bar", key="gmail_pasted_url")
-                    if st.button("Complete Connection", type="primary"):
-                        ok, msg = gmail_client.complete_signin(pasted)
-                        (st.success if ok else st.error)(msg)
-                        if ok:
-                            st.session_state.pop("gmail_auth_url", None)
-                            st.rerun()
+                        st.session_state.pop("gmail_auth_url", None)
+                        st.rerun()
 
     with st.container(border=True):
         st.markdown("#### 3. Your profile")
-        st.caption("This tells the AI who you are, so emails to professors stay honest and specific.")
-        applicant = db.get_applicant()
+        applicant = db.get_applicant(user_id)
         c1, c2 = st.columns(2)
         with c1:
             your_name = st.text_input("Your name", value=applicant.get("your_name", ""))
@@ -117,24 +158,23 @@ if page == "⚙️ Setup":
             target_degree = st.text_input("Target degree/program", value=applicant.get("target_degree", ""),
                                            placeholder="e.g. PhD in Computer Science")
         background = st.text_area(
-            "Your background / research interests",
-            value=applicant.get("background", ""),
+            "Your background / research interests", value=applicant.get("background", ""),
             placeholder="e.g. I have a Master's in robotics, worked on reinforcement learning for "
                         "manipulator arms, and I'm interested in sim-to-real transfer.",
             height=120,
         )
         if st.button("Save Profile", type="primary"):
-            db.save_applicant_profile(your_name, target_degree, background)
+            db.save_applicant_profile(user_id, your_name, target_degree, background)
             st.success("Profile saved.")
 
     with st.container(border=True):
         st.markdown("#### 4. Upload your CV")
-        st.caption("This gets attached automatically when you send an approved email via Gmail.")
-        if db.has_cv():
-            st.success(f"🟢 CV on file: {db.get_applicant()['cv_filename']}")
+        st.caption("Attached automatically when you send an approved email via Gmail.")
+        if db.has_cv(user_id):
+            st.success(f"🟢 CV on file: {db.get_applicant(user_id)['cv_filename']}")
         cv_file = st.file_uploader("Upload CV (PDF recommended)", type=["pdf", "doc", "docx"])
         if cv_file is not None and st.button("Save CV"):
-            db.save_cv(cv_file.name, cv_file.getvalue())
+            db.save_cv(user_id, cv_file.name, cv_file.getvalue())
             st.success(f"CV saved: {cv_file.name}")
             st.rerun()
 
@@ -147,7 +187,7 @@ elif page == "👨‍🏫 Professors":
 
     with st.container(border=True):
         st.markdown("#### Add a professor manually")
-        st.caption("Only name and email are required — everything else helps the AI personalize better.")
+        st.caption("Only name and email are required.")
         c1, c2 = st.columns(2)
         professor_name = c1.text_input("Professor name *")
         email = c2.text_input("Email *")
@@ -157,7 +197,8 @@ elif page == "👨‍🏫 Professors":
         research_area = st.text_input("Research area", placeholder="e.g. computational biology, robotics, NLP")
         profile_url = st.text_input("Profile URL (lab page, Google Scholar, etc.)")
         if st.button("➕ Add Professor", type="primary"):
-            ok, msg = db.add_professor(professor_name, email, university, department, research_area, profile_url)
+            ok, msg = db.add_professor(user_id, professor_name, email, university, department,
+                                        research_area, profile_url)
             (st.success if ok else st.error)(msg)
 
     with st.container(border=True):
@@ -168,13 +209,13 @@ elif page == "👨‍🏫 Professors":
         if csv_file is not None and st.button("📥 Import CSV"):
             try:
                 df = pd.read_csv(csv_file)
-                count, msg = db.import_csv(df)
+                count, msg = db.import_csv(user_id, df)
                 st.success(msg) if count else st.error(msg)
             except Exception as e:
                 st.error(f"Could not read CSV: {e}")
 
     st.markdown("#### All professors")
-    st.dataframe(db.professors_dataframe(), width='stretch', hide_index=True)
+    st.dataframe(db.professors_dataframe(user_id), width='stretch', hide_index=True)
 
 
 # =============================================================================
@@ -183,55 +224,56 @@ elif page == "👨‍🏫 Professors":
 elif page == "🔍 Research & Fit":
     ui.page_header("Research & Fit", "AI researches the professor, then a deterministic formula scores the fit.")
 
-    options = db.professor_options()
+    options = db.professor_options(user_id)
     if not options:
         st.info("Add a professor first on the Professors page.")
     else:
         label = st.selectbox("Select a professor", list(options.keys()))
         prof_id = options[label]
-        prof = db.get_professor(prof_id)
-        applicant = db.get_applicant()
+        prof = db.get_professor(user_id, prof_id)
+        applicant = db.get_applicant(user_id)
 
         if not applicant.get("background"):
-            st.warning("Fill in your background on the Setup page first — it makes research and scoring much better.")
+            st.warning("Fill in your background on the Setup page first.")
 
         if st.button("Run AI Research + Fit Scoring", type="primary"):
             ok, msg, data = ai_engine.run_research(prof, applicant)
             if ok:
-                db.save_research(prof_id, data)
+                db.save_research(user_id, prof_id, data)
                 breakdown, total, reason = ai_engine.calculate_score(prof, data, applicant)
-                db.save_score(prof_id, breakdown, total, reason)
+                db.save_score(user_id, prof_id, breakdown, total, reason)
                 st.success(msg)
             else:
                 st.error(msg)
 
-        research = db.get_research(prof_id)
+        research = db.get_research(user_id, prof_id)
         if research:
             st.divider()
             ui.render_research(research)
             st.divider()
+            prof = db.get_professor(user_id, prof_id)  # refetch after save
             ui.render_score_breakdown(prof["score_breakdown"], prof["fit_score"], prof["score_reason"])
 
 
 # =============================================================================
-# PAGE: MESSAGES
+# PAGE: MESSAGES — now with a real rich-text editor
 # =============================================================================
 elif page == "✉️ Messages":
-    ui.page_header("Messages", "Generate drafts. Nothing here sends anything — see Approval Queue for that.")
+    ui.page_header("Messages", "Generate drafts, then format them however you like before approving.")
 
-    options = db.professor_options()
+    options = db.professor_options(user_id)
     if not options:
         st.info("Add a professor first on the Professors page.")
     else:
         label = st.selectbox("Select a professor", list(options.keys()))
         prof_id = options[label]
-        prof = db.get_professor(prof_id)
-        research = db.get_research(prof_id)
-        applicant = db.get_applicant()
+        prof = db.get_professor(user_id, prof_id)
+        research = db.get_research(user_id, prof_id)
+        applicant = db.get_applicant(user_id)
 
         if not research:
-            st.warning("Run research on this professor first (Research & Fit page) for grounded, personalized drafts.")
-        if not db.has_cv():
+            st.warning("Run research on this professor first (Research & Fit page) for grounded drafts.")
+        if not db.has_cv(user_id):
             st.info("No CV uploaded yet (Setup page) — emails will still generate, but won't have anything to attach when sent.")
 
         with st.container(border=True):
@@ -239,7 +281,11 @@ elif page == "✉️ Messages":
             if st.button("Generate email draft"):
                 ok, msg, data = ai_engine.generate_email(prof, applicant, research)
                 if ok:
-                    db.new_message(prof_id, "EMAIL", data.get("subject", ""), data.get("body", ""))
+                    body_text = data.get("body", "")
+                    # Turn the AI's plain-text draft into simple HTML paragraphs
+                    # so it opens correctly in the rich editor.
+                    body_html = "".join(f"<p>{line}</p>" for line in body_text.split("\n") if line.strip())
+                    db.new_message(user_id, prof_id, "EMAIL", data.get("subject", ""), body_html, body_text)
                     st.success(msg)
                 else:
                     st.error(msg)
@@ -249,24 +295,33 @@ elif page == "✉️ Messages":
             if st.button("Generate follow-ups"):
                 ok, msg, data = ai_engine.generate_followups(prof, applicant, research)
                 if ok:
-                    db.new_message(prof_id, "FOLLOW_UP_DAY7", "", data.get("day7", ""))
-                    db.new_message(prof_id, "FOLLOW_UP_DAY14", "", data.get("day14", ""))
+                    for key, label_ in [("day7", "FOLLOW_UP_DAY7"), ("day14", "FOLLOW_UP_DAY14")]:
+                        body_text = data.get(key, "")
+                        body_html = "".join(f"<p>{line}</p>" for line in body_text.split("\n") if line.strip())
+                        db.new_message(user_id, prof_id, label_, "", body_html, body_text)
                     st.success(msg)
                 else:
                     st.error(msg)
 
         st.divider()
-        st.markdown("#### Drafts for this professor")
-        msgs = db.messages_for_professor(prof_id)
+        st.markdown("#### Drafts for this professor — edit formatting here")
+        msgs = db.messages_for_professor(user_id, prof_id)
         if not msgs:
             st.caption("No drafts yet.")
         for m in msgs:
             with st.expander(f"{m['message_type']} · {m['status']} · #{m['id']}"):
                 if m["subject"]:
                     st.text_input("Subject", value=m["subject"], key=f"subj_{m['id']}", disabled=True)
-                edited = st.text_area("Body", value=m["body"], key=f"body_{m['id']}")
-                if edited != m["body"]:
-                    db.update_message_body(m["id"], edited)
+
+                st.caption("Use the toolbar for headings, bold, bullets, colors, and font.")
+                new_html = st_quill(
+                    value=m["body_html"], html=True, key=f"quill_{m['id']}",
+                    placeholder="Write your email...",
+                )
+                if new_html is not None and new_html != m["body_html"]:
+                    new_text = gmail_client.html_to_plain_text(new_html)
+                    db.update_message_body(user_id, m["id"], new_html, new_text)
+
                 st.caption("Go to Approval Queue to approve, reject, or send.")
 
 
@@ -276,11 +331,11 @@ elif page == "✉️ Messages":
 elif page == "📋 Approval Queue":
     ui.page_header("Approval Queue", "Only APPROVED messages can ever be marked SENT — enforced in code.")
 
-    msgs = db.all_messages()
+    msgs = db.all_messages(user_id)
     if not msgs:
         st.info("No messages generated yet. Go to the Messages page.")
     else:
-        st.dataframe(db.messages_dataframe(), width='stretch', hide_index=True)
+        st.dataframe(db.messages_dataframe(user_id), width='stretch', hide_index=True)
         st.divider()
 
         pending = [m for m in msgs if m["status"] in ("GENERATED", "EDITED")]
@@ -289,45 +344,45 @@ elif page == "📋 Approval Queue":
         if pending:
             st.markdown("#### Awaiting your review")
             for m in pending:
-                prof = db.get_professor(m["prof_id"])
+                prof = db.get_professor(user_id, m["prof_id"])
                 with st.container(border=True):
                     st.markdown(f"**#{m['id']} · {m['message_type']} · {prof['professor_name'] if prof else '?'}**")
-                    st.write(m["body"])
+                    st.markdown(m["body_html"], unsafe_allow_html=True)
                     c1, c2 = st.columns(2)
                     if c1.button("✅ Approve", key=f"appr_{m['id']}", type="primary"):
-                        ok, msg = db.transition_message(m["id"], "APPROVED")
+                        ok, msg = db.transition_message(user_id, m["id"], "APPROVED")
                         (st.success if ok else st.error)(msg)
                         st.rerun()
                     if c2.button("❌ Reject", key=f"rej_{m['id']}"):
-                        ok, msg = db.transition_message(m["id"], "REJECTED")
+                        ok, msg = db.transition_message(user_id, m["id"], "REJECTED")
                         (st.success if ok else st.error)(msg)
                         st.rerun()
 
         if approved:
             st.markdown("#### Approved — ready to send")
-            applicant = db.get_applicant()
+            applicant = db.get_applicant(user_id)
             for m in approved:
-                prof = db.get_professor(m["prof_id"])
+                prof = db.get_professor(user_id, m["prof_id"])
                 with st.container(border=True):
                     st.markdown(f"**#{m['id']} · {m['message_type']} · {prof['professor_name'] if prof else '?'}**")
-                    st.write(m["body"])
+                    st.markdown(m["body_html"], unsafe_allow_html=True)
 
-                    opted_out = prof and db.is_opted_out(prof["id"])
+                    opted_out = prof and db.is_opted_out(user_id, prof["id"])
                     if opted_out:
                         st.error("This professor asked not to be contacted further — sending is blocked.")
-                    elif gmail_client.is_connected():
-                        will_attach = db.has_cv()
-                        if will_attach:
-                            st.caption(f"📎 Will attach: {applicant['cv_filename']}")
-                        else:
-                            st.caption("⚠️ No CV uploaded — will send without an attachment.")
+                    elif gmail_client.is_connected(user_id):
+                        will_attach = db.has_cv(user_id)
+                        st.caption(f"📎 Will attach: {applicant['cv_filename']}" if will_attach
+                                   else "⚠️ No CV uploaded — will send without an attachment.")
                         if st.button("📤 Send via Gmail", key=f"send_{m['id']}", type="primary"):
                             to_email = prof["email"] if prof else ""
                             cv_name = applicant.get("cv_filename") if will_attach else None
                             cv_bytes = applicant.get("cv_bytes") if will_attach else None
-                            ok, msg = gmail_client.send_email(to_email, m["subject"], m["body"], cv_name, cv_bytes)
+                            ok, msg = gmail_client.send_email(
+                                to_email, m["subject"], m["body_html"], m["body_text"], cv_name, cv_bytes
+                            )
                             if ok:
-                                db.transition_message(m["id"], "SENT")
+                                db.transition_message(user_id, m["id"], "SENT")
                                 st.success(msg)
                             else:
                                 st.error(msg)
@@ -335,7 +390,7 @@ elif page == "📋 Approval Queue":
                     else:
                         st.caption("Gmail isn't connected — this will only update the status, not really send.")
                         if st.button("📤 Mark as Sent (simulated)", key=f"send_{m['id']}"):
-                            ok, msg = db.transition_message(m["id"], "SENT")
+                            ok, msg = db.transition_message(user_id, m["id"], "SENT")
                             (st.success if ok else st.error)(msg)
                             st.rerun()
 
@@ -349,7 +404,7 @@ elif page == "📋 Approval Queue":
 elif page == "📥 Inbox":
     ui.page_header("Inbox", "Paste a professor's reply to see how the AI classifies it.")
 
-    options = db.professor_options()
+    options = db.professor_options(user_id)
     if not options:
         st.info("Add a professor first on the Professors page.")
     else:
@@ -366,12 +421,12 @@ elif page == "📥 Inbox":
                     classification = data.get("classification", "UNKNOWN")
                     risk_flag = data.get("risk_flag", False)
                     risk_category = data.get("risk_category", "NONE") if risk_flag else "NONE"
-                    db.save_inbound_reply(prof_id, reply_text, classification, risk_category)
+                    db.save_inbound_reply(user_id, prof_id, reply_text, classification, risk_category)
 
                     if classification == "NOT_INTERESTED_NO_FURTHER_CONTACT":
-                        st.error("This professor asked not to be contacted further — marked, no more outreach to them.")
+                        st.error("Marked — no more outreach to this professor.")
                     elif risk_flag:
-                        st.warning(f"⚠️ Flagged ({risk_category}) — worth replying to personally rather than with a template.")
+                        st.warning(f"⚠️ Flagged ({risk_category}) — worth replying to personally.")
                     else:
                         st.success(f"Classified as {classification}.")
 
@@ -384,11 +439,11 @@ elif page == "📥 Inbox":
                 else:
                     st.error(msg)
 
-        history = db.conversations_for_professor(prof_id)
+        history = db.conversations_for_professor(user_id, prof_id)
         if history:
             st.divider()
             st.markdown("#### History for this professor")
-            for c in reversed(history):
+            for c in history:
                 st.caption(f"{c['timestamp']} · {c['classification']}")
                 st.write(c["content"])
 
@@ -399,7 +454,7 @@ elif page == "📥 Inbox":
 elif page == "📊 Dashboard":
     ui.page_header("Dashboard")
 
-    stats = db.dashboard_stats()
+    stats = db.dashboard_stats(user_id)
     c1, c2, c3 = st.columns(3)
     c1.metric("Total professors", stats["total_professors"])
     c2.metric("Strong fits (score ≥ 60)", stats["strong_fits"])
@@ -412,4 +467,4 @@ elif page == "📊 Dashboard":
 
     st.divider()
     with st.expander("Audit log"):
-        st.dataframe(db.audit_log_dataframe(), width='stretch', hide_index=True)
+        st.dataframe(db.audit_log_dataframe(user_id), width='stretch', hide_index=True)
