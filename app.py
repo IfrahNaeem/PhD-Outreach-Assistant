@@ -83,7 +83,6 @@ def _footer_html(footer_text):
 PAGES = [
     "⚙️ Setup",
     "👨‍🏫 Professors",
-    "🔍 Research & Fit",
     "✉️ Messages",
     "📋 Approval Queue",
     "📥 Inbox",
@@ -333,41 +332,6 @@ elif page == "👨‍🏫 Professors":
 
 
 # =============================================================================
-# PAGE: RESEARCH & FIT
-# =============================================================================
-elif page == "🔍 Research & Fit":
-    ui.page_header("Research & Fit", "AI researches the professor, then a deterministic formula scores the fit.")
-
-    options = db.professor_options(user_id)
-    if not options:
-        st.info("Add a professor first on the Professors page.")
-    else:
-        label = st.selectbox("Select a professor", list(options.keys()))
-        prof_id = options[label]
-        prof = db.get_professor(user_id, prof_id)
-        applicant = db.get_applicant(user_id)
-
-        if not applicant.get("background"):
-            st.warning("Fill in your background on the Setup page first.")
-
-        if st.button("Run AI Research + Fit Scoring", type="primary"):
-            ok, msg, data = ai_engine.run_research(prof, applicant)
-            if ok:
-                db.save_research(user_id, prof_id, data)
-                breakdown, total, reason = ai_engine.calculate_score(prof, data, applicant)
-                db.save_score(user_id, prof_id, breakdown, total, reason)
-                st.success(msg)
-            else:
-                st.error(msg)
-
-        research = db.get_research(user_id, prof_id)
-        if research:
-            st.divider()
-            ui.render_research(research)
-            st.divider()
-            prof = db.get_professor(user_id, prof_id)  # refetch after save
-            ui.render_score_breakdown(prof["score_breakdown"], prof["fit_score"], prof["score_reason"])
-
 
 # =============================================================================
 # PAGE: MESSAGES — now with a real rich-text editor
@@ -385,8 +349,7 @@ elif page == "✉️ Messages":
             st.markdown("#### 🚀 Bulk generate")
             st.caption(
                 "Pick several professors and generate a personalized email for each one in a single "
-                "click. Research (from the Research & Fit page) is optional but recommended — "
-                "professors without it still get an email, just a more generic one. Every email "
+                "click, grounded on their name/university/department/research area. Every email "
                 "still needs its own separate approval before it can ever be sent."
             )
             selected_labels = st.multiselect("Select professors", list(options.keys()), key="bulk_select")
@@ -412,10 +375,9 @@ elif page == "✉️ Messages":
                 for i, sel_label in enumerate(selected_labels):
                     pid = options[sel_label]
                     prof = db.get_professor(user_id, pid)
-                    research = db.get_research(user_id, pid)  # may be None — that's fine now
                     progress.progress(i / total, text=f"Generating for {prof['professor_name']}...")
 
-                    ok, msg, data = ai_engine.generate_email(prof, applicant, research)
+                    ok, msg, data = ai_engine.generate_email(prof, applicant)
                     if not ok:
                         results.append((prof["professor_name"], False, msg))
                         continue
@@ -425,10 +387,10 @@ elif page == "✉️ Messages":
                     body_html += footer_html
                     subject = shared_subject if subject_mode == "Use the same subject for all" else data.get("subject", "")
                     db.new_message(user_id, pid, "EMAIL", subject, body_html, body_text)
-                    status_msg = "Email generated." if research else "Email generated (no research on file — more generic)."
+                    status_msg = "Email generated."
 
                     if include_followups:
-                        ok2, msg2, data2 = ai_engine.generate_followups(prof, applicant, research)
+                        ok2, msg2, data2 = ai_engine.generate_followups(prof, applicant)
                         if ok2:
                             for key, ftype in [("day7", "FOLLOW_UP_DAY7"), ("day14", "FOLLOW_UP_DAY14")]:
                                 bt = data2.get(key, "") + ("\n\n" + footer_text if footer_text else "")
@@ -451,11 +413,10 @@ elif page == "✉️ Messages":
         label = st.selectbox("Select a professor", list(options.keys()))
         prof_id = options[label]
         prof = db.get_professor(user_id, prof_id)
-        research = db.get_research(user_id, prof_id)
 
-        if not research:
-            st.caption("💡 No research on file for this professor yet — optional, but running it on the "
-                       "Research & Fit page first tends to produce a more specific, personalized email.")
+        if not prof.get("research_area"):
+            st.caption("💡 No research area on file for this professor — the email will be more generic. "
+                       "You can add one on the Professors page.")
         if not db.has_cv(user_id):
             st.info("No CV uploaded yet (Setup page) — emails will still generate, but won't have anything to attach when sent.")
 
@@ -463,7 +424,7 @@ elif page == "✉️ Messages":
             st.markdown("#### 📧 Supervision inquiry email")
             custom_subject = st.text_input("Subject (leave blank to let the AI write one)", key="single_subject")
             if st.button("Generate email draft"):
-                ok, msg, data = ai_engine.generate_email(prof, applicant, research)
+                ok, msg, data = ai_engine.generate_email(prof, applicant)
                 if ok:
                     footer_text = applicant.get("email_footer", "")
                     body_text = data.get("body", "") + ("\n\n" + footer_text if footer_text else "")
@@ -480,7 +441,7 @@ elif page == "✉️ Messages":
         with st.container(border=True):
             st.markdown("#### 🔁 Follow-ups (Day 7 / 14)")
             if st.button("Generate follow-ups"):
-                ok, msg, data = ai_engine.generate_followups(prof, applicant, research)
+                ok, msg, data = ai_engine.generate_followups(prof, applicant)
                 if ok:
                     footer_text = applicant.get("email_footer", "")
                     for key, label_ in [("day7", "FOLLOW_UP_DAY7"), ("day14", "FOLLOW_UP_DAY14")]:
