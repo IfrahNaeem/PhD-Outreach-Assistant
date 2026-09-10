@@ -501,7 +501,54 @@ elif page == "✉️ Messages":
                     new_text = gmail_client.html_to_plain_text(new_html)
                     db.update_message_body(user_id, m["id"], new_html, new_text)
 
-                st.caption("Go to Approval Queue to approve, reject, or send.")
+                # Re-fetch after any edits above so status/content are current.
+                m_now = db.get_message(user_id, m["id"])
+
+                st.divider()
+                if m_now["status"] in ("REJECTED", "SENT"):
+                    st.caption(f"This message is **{m_now['status']}** — no further action needed here.")
+                else:
+                    prof_for_send = db.get_professor(user_id, m_now["prof_id"])
+                    opted_out = prof_for_send and db.is_opted_out(user_id, prof_for_send["id"])
+
+                    if opted_out:
+                        st.error("This professor asked not to be contacted further — sending is blocked.")
+                    elif gmail_client.is_connected(user_id):
+                        will_attach = db.has_cv(user_id)
+                        st.caption(f"📎 Will attach: {applicant['cv_filename']}" if will_attach
+                                   else "⚠️ No CV uploaded — will send without an attachment.")
+                        c1, c2 = st.columns(2)
+                        if c1.button("✅ Approve & Send via Gmail", key=f"quicksend_{m['id']}", type="primary"):
+                            if m_now["status"] in ("GENERATED", "EDITED"):
+                                db.transition_message(user_id, m_now["id"], "APPROVED")
+                            to_email = prof_for_send["email"] if prof_for_send else ""
+                            cv_name = applicant.get("cv_filename") if will_attach else None
+                            cv_bytes = applicant.get("cv_bytes") if will_attach else None
+                            ok, send_msg = gmail_client.send_email(
+                                to_email, m_now["subject"], m_now["body_html"], m_now["body_text"], cv_name, cv_bytes
+                            )
+                            if ok:
+                                db.transition_message(user_id, m_now["id"], "SENT")
+                                if prof_for_send:
+                                    db.mark_professor_contacted(user_id, prof_for_send["id"])
+                                st.success(send_msg + " This professor has moved out of your active list.")
+                            else:
+                                st.error(send_msg)
+                            st.rerun()
+                        if c2.button("❌ Reject", key=f"quickreject_{m['id']}"):
+                            db.transition_message(user_id, m_now["id"], "REJECTED")
+                            st.rerun()
+                    else:
+                        st.caption("Gmail isn't connected (Setup page) — you can still Approve here; "
+                                   "actual sending happens once Gmail is connected.")
+                        c1, c2 = st.columns(2)
+                        if c1.button("✅ Approve", key=f"quickapprove_{m['id']}", type="primary"):
+                            if m_now["status"] in ("GENERATED", "EDITED"):
+                                db.transition_message(user_id, m_now["id"], "APPROVED")
+                                st.rerun()
+                        if c2.button("❌ Reject", key=f"quickreject_{m['id']}"):
+                            db.transition_message(user_id, m_now["id"], "REJECTED")
+                            st.rerun()
 
 
 # =============================================================================
@@ -562,7 +609,9 @@ elif page == "📋 Approval Queue":
                             )
                             if ok:
                                 db.transition_message(user_id, m["id"], "SENT")
-                                st.success(msg)
+                                if prof:
+                                    db.mark_professor_contacted(user_id, prof["id"])
+                                st.success(msg + " This professor has moved out of your active list.")
                             else:
                                 st.error(msg)
                             st.rerun()
@@ -570,6 +619,8 @@ elif page == "📋 Approval Queue":
                         st.caption("Gmail isn't connected — this will only update the status, not really send.")
                         if st.button("📤 Mark as Sent (simulated)", key=f"send_{m['id']}"):
                             ok, msg = db.transition_message(user_id, m["id"], "SENT")
+                            if ok and prof:
+                                db.mark_professor_contacted(user_id, prof["id"])
                             (st.success if ok else st.error)(msg)
                             st.rerun()
 
@@ -589,7 +640,7 @@ elif page == "📋 Approval Queue":
 elif page == "📥 Inbox":
     ui.page_header("Inbox", "Paste a professor's reply to see how the AI classifies it.")
 
-    options = db.professor_options(user_id)
+    options = db.professor_options(user_id, include_contacted=True)
     if not options:
         st.info("Add a professor first on the Professors page.")
     else:
@@ -654,6 +705,11 @@ elif page == "📊 Dashboard":
     st.markdown("#### By university & department")
     st.caption("Where your outreach stands, broken down by school.")
     st.dataframe(db.dashboard_by_university(user_id), width='stretch', hide_index=True)
+
+    st.divider()
+    st.markdown("#### 📧 Sent emails")
+    st.caption("Everyone you've actually emailed — they no longer appear in your active Professors list.")
+    st.dataframe(db.sent_emails_dataframe(user_id), width='stretch', hide_index=True)
 
     st.divider()
     with st.expander("Audit log"):
