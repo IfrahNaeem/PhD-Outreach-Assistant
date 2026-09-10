@@ -351,18 +351,21 @@ def _professor_to_dict(p):
     }
 
 
-def all_professors(user_id):
+def all_professors(user_id, include_contacted=True):
     s = get_session()
     try:
         rows = s.query(Professor).filter_by(user_id=user_id).order_by(Professor.id).all()
-        return [_professor_to_dict(p) for p in rows]
+        profs = [_professor_to_dict(p) for p in rows]
     finally:
         s.close()
+    if not include_contacted:
+        profs = [p for p in profs if p["status"] != "CONTACTED"]
+    return profs
 
 
-def professors_dataframe(user_id):
+def professors_dataframe(user_id, include_contacted=False):
     import pandas as pd
-    profs = all_professors(user_id)
+    profs = all_professors(user_id, include_contacted=include_contacted)
     if not profs:
         return pd.DataFrame(columns=["ID", "Professor", "University", "Department", "Fit Score", "Status"])
     return pd.DataFrame([{
@@ -381,10 +384,29 @@ def get_professor(user_id, prof_id):
         s.close()
 
 
-def professor_options(user_id):
-    profs = all_professors(user_id)
+def professor_options(user_id, include_contacted=False):
+    profs = all_professors(user_id, include_contacted=include_contacted)
     return {f"#{p['id']} — {p['professor_name']} ({p['university'] or 'no university listed'})": p["id"]
             for p in profs}
+
+
+def mark_professor_contacted(user_id, prof_id):
+    """Called right after an email is actually sent to this professor. Moves
+    them out of your active Professors/Messages lists (without deleting
+    anything — the sent record stays intact for the dashboard)."""
+    s = get_session()
+    try:
+        p = s.query(Professor).filter_by(id=int(prof_id), user_id=user_id).first()
+        if p:
+            p.status = "CONTACTED"
+            s.commit()
+            name = p.professor_name
+        else:
+            name = None
+    finally:
+        s.close()
+    if name:
+        log_audit(user_id, "PROFESSOR_CONTACTED", name)
 
 
 def is_opted_out(user_id, prof_id):
@@ -653,5 +675,26 @@ def dashboard_by_university(user_id):
             "Emails Generated": g["generated"],
             "Emails Sent": g["sent"],
             "Emails Not Sent": g["generated"] - g["sent"],
+        })
+    return pd.DataFrame(rows)
+
+
+def sent_emails_dataframe(user_id):
+    """Every email that's actually been sent, with the professor's info —
+    this is the record of who you've contacted, since they no longer show
+    up in your active Professors list once sent."""
+    import pandas as pd
+    msgs = [m for m in all_messages(user_id) if m["message_type"] == "EMAIL" and m["status"] == "SENT"]
+    if not msgs:
+        return pd.DataFrame(columns=["Professor", "Email", "University", "Department", "Research Area", "Sent At"])
+    rows = []
+    for m in msgs:
+        p = get_professor(user_id, m["prof_id"])
+        if not p:
+            continue
+        rows.append({
+            "Professor": p["professor_name"], "Email": p["email"],
+            "University": p["university"], "Department": p["department"],
+            "Research Area": p["research_area"], "Sent At": m["created_at"],
         })
     return pd.DataFrame(rows)
