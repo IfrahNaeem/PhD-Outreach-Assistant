@@ -181,6 +181,25 @@ def _build_raw_message(to_email, subject, html_body, plain_body,
     return {"raw": raw}
 
 
+def build_compose_url(to_email, subject, plain_body):
+    """Builds a link that opens a real Gmail compose window (in whichever
+    Google account the user is logged into in their browser), pre-filled
+    with the recipient, subject, and a plain-text starting body. This
+    doesn't send anything by itself, and doesn't need OAuth — the person
+    formats and sends it themselves, directly in Gmail's own editor.
+    That sidesteps any HTML-rendering mismatch entirely, since whatever
+    they see in Gmail IS what gets sent."""
+    import urllib.parse
+    params = {
+        "view": "cm",
+        "fs": "1",
+        "to": to_email or "",
+        "su": subject or "",
+        "body": plain_body or "",
+    }
+    return "https://mail.google.com/mail/?" + urllib.parse.urlencode(params, quote_via=urllib.parse.quote)
+
+
 def send_email(to_email, subject, html_body, plain_body=None,
                 attachment_filename=None, attachment_bytes=None):
     from googleapiclient.discovery import build
