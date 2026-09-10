@@ -274,6 +274,34 @@ elif page == "👨‍🏫 Professors":
                 review_df, hide_index=True, width='stretch', key="extract_review_editor",
                 column_config={"include": st.column_config.CheckboxColumn("Add?")},
             )
+
+            missing_mask = edited_df["research_area"].astype(str).str.strip() == ""
+            missing_count = int(missing_mask.sum())
+            if missing_count:
+                st.caption(f"⚠️ {missing_count} row(s) have no research area (add_professor requires "
+                           f"one). You can type them in above, or look them up automatically below.")
+                if st.button(f"🔎 Look up missing research areas via web search ({missing_count})"):
+                    st.caption("Real web searches, one per person — this may take a little while and "
+                               "uses your Anthropic API usage.")
+                    rows = edited_df.to_dict("records")
+                    missing_idx = [i for i, r in enumerate(rows) if not str(r.get("research_area", "")).strip()]
+                    total = len(missing_idx)
+                    progress = st.progress(0.0, text="Starting...")
+                    found_count = 0
+                    for j, i in enumerate(missing_idx):
+                        name = rows[i].get("professor_name", "")
+                        progress.progress(j / total, text=f"Looking up {name}...")
+                        uni = university_hint.split(",")[0].strip() if university_hint else ""
+                        dept = university_hint.split(",")[1].strip() if "," in university_hint else ""
+                        ok, msg, area = ai_engine.lookup_research_area(name, uni, dept)
+                        if ok and area:
+                            rows[i]["research_area"] = area
+                            found_count += 1
+                    progress.progress(1.0, text="Done.")
+                    st.success(f"Found research areas for {found_count} of {total} professor(s).")
+                    st.session_state["extracted_professors"] = rows
+                    st.rerun()
+
             if st.button("➕ Add Selected to My Professor List", type="primary"):
                 added = 0
                 skipped = []
