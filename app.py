@@ -539,40 +539,53 @@ elif page == "✉️ Messages":
 
                     if opted_out:
                         st.error("This professor asked not to be contacted further — sending is blocked.")
-                    elif gmail_client.is_connected(user_id):
-                        will_attach = db.has_cv(user_id)
-                        st.caption(f"📎 Will attach: {applicant['cv_filename']}" if will_attach
-                                   else "⚠️ No CV uploaded — will send without an attachment.")
+                    elif m_now["status"] in ("GENERATED", "EDITED"):
                         c1, c2 = st.columns(2)
-                        if c1.button("✅ Approve & Send via Gmail", key=f"quicksend_{m['id']}", type="primary"):
-                            if m_now["status"] in ("GENERATED", "EDITED"):
-                                db.transition_message(user_id, m_now["id"], "APPROVED")
-                            to_email = prof_for_send["email"] if prof_for_send else ""
-                            cv_name = applicant.get("cv_filename") if will_attach else None
-                            cv_bytes = applicant.get("cv_bytes") if will_attach else None
-                            ok, send_msg = gmail_client.send_email(
-                                to_email, m_now["subject"], m_now["body_html"], m_now["body_text"], cv_name, cv_bytes
-                            )
-                            if ok:
-                                db.transition_message(user_id, m_now["id"], "SENT")
-                                if prof_for_send:
-                                    db.mark_professor_contacted(user_id, prof_for_send["id"])
-                                st.success(send_msg + " This professor has moved out of your active list.")
-                            else:
-                                st.error(send_msg)
+                        if c1.button("✅ Approve", key=f"quickapprove_{m['id']}", type="primary"):
+                            db.transition_message(user_id, m_now["id"], "APPROVED")
                             st.rerun()
                         if c2.button("❌ Reject", key=f"quickreject_{m['id']}"):
                             db.transition_message(user_id, m_now["id"], "REJECTED")
                             st.rerun()
                     else:
-                        st.caption("Gmail isn't connected (Setup page) — you can still Approve here; "
-                                   "actual sending happens once Gmail is connected.")
-                        c1, c2 = st.columns(2)
-                        if c1.button("✅ Approve", key=f"quickapprove_{m['id']}", type="primary"):
-                            if m_now["status"] in ("GENERATED", "EDITED"):
-                                db.transition_message(user_id, m_now["id"], "APPROVED")
+                        # status == APPROVED — offer both ways to actually send
+                        st.success("Approved — choose how to send it:")
+                        to_email = prof_for_send["email"] if prof_for_send else ""
+
+                        if gmail_client.is_connected(user_id):
+                            will_attach = db.has_cv(user_id)
+                            st.caption(f"📎 Will attach: {applicant['cv_filename']}" if will_attach
+                                       else "⚠️ No CV uploaded — will send without an attachment.")
+                            if st.button("📤 Send automatically via Gmail", key=f"autosend_{m['id']}", type="primary"):
+                                cv_name = applicant.get("cv_filename") if will_attach else None
+                                cv_bytes = applicant.get("cv_bytes") if will_attach else None
+                                ok, send_msg = gmail_client.send_email(
+                                    to_email, m_now["subject"], m_now["body_html"], m_now["body_text"], cv_name, cv_bytes
+                                )
+                                if ok:
+                                    db.transition_message(user_id, m_now["id"], "SENT")
+                                    if prof_for_send:
+                                        db.mark_professor_contacted(user_id, prof_for_send["id"])
+                                    st.success(send_msg + " This professor has moved out of your active list.")
+                                else:
+                                    st.error(send_msg)
                                 st.rerun()
-                        if c2.button("❌ Reject", key=f"quickreject_{m['id']}"):
+                            st.caption("— or —")
+
+                        compose_url = gmail_client.build_compose_url(to_email, m_now["subject"], m_now["body_text"])
+                        st.link_button("📧 Open in Gmail to format & send yourself", compose_url)
+                        st.caption("Opens a real Gmail compose window. Format it however you like there, "
+                                   "attach your CV manually if you want one, then hit Send in Gmail. Come back "
+                                   "and confirm below once you have:")
+                        if st.button("✅ I sent this", key=f"confirmsent_{m['id']}"):
+                            db.transition_message(user_id, m_now["id"], "SENT")
+                            if prof_for_send:
+                                db.mark_professor_contacted(user_id, prof_for_send["id"])
+                            st.success("Marked as sent. This professor has moved out of your active list.")
+                            st.rerun()
+
+                        st.divider()
+                        if st.button("❌ Reject instead", key=f"quickreject_{m['id']}"):
                             db.transition_message(user_id, m_now["id"], "REJECTED")
                             st.rerun()
 
