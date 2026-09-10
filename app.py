@@ -10,6 +10,8 @@ or locally in .streamlit/secrets.toml):
     GOOGLE_CLIENT_CONFIG = '''{"installed": {...contents of your client_secret.json...}}'''
 """
 
+import re
+
 import pandas as pd
 import streamlit as st
 from streamlit_quill import st_quill
@@ -71,13 +73,37 @@ if not auth.is_logged_in():
 # =============================================================================
 user_id = auth.current_user_id()
 
+def _text_to_html(text):
+    """Converts plain text into properly structured HTML: a blank line
+    between two lines starts a new paragraph, while a single line break
+    within a block just becomes a <br>.
+
+    This matters because AI-generated text often has soft line-wraps
+    within one logical paragraph (or bullet lists, one item per line with
+    no blank line between them). Wrapping every single line in its own
+    <p> — which is what naive "one <p> per line" logic used to do — makes
+    an email client apply its own default paragraph spacing to EVERY
+    line, turning one tidy paragraph into a stack of oddly gapped lines.
+    Grouping correctly here means the same content looks the same whether
+    you're looking at it in the editor or in the actual sent email."""
+    if not text or not text.strip():
+        return ""
+    blocks = re.split(r"\n\s*\n", text.strip())
+    html_parts = []
+    for block in blocks:
+        lines = [ln for ln in block.split("\n") if ln.strip()]
+        if not lines:
+            continue
+        html_parts.append(f"<p>{'<br>'.join(lines)}</p>")
+    return "".join(html_parts)
+
+
 def _footer_html(footer_text):
-    """Turns the plain-text footer from the profile into HTML paragraphs,
-    with a horizontal rule separating it from the message body."""
+    """Turns the plain-text footer from the profile into HTML, with a
+    horizontal rule separating it from the message body."""
     if not footer_text or not footer_text.strip():
         return ""
-    lines = footer_text.split("\n")
-    return "<hr>" + "".join(f"<p>{line}</p>" if line.strip() else "<br>" for line in lines)
+    return "<hr>" + _text_to_html(footer_text)
 
 
 PAGES = [
@@ -411,7 +437,7 @@ elif page == "✉️ Messages":
                         continue
 
                     body_text = data.get("body", "") + ("\n\n" + footer_text if footer_text else "")
-                    body_html = "".join(f"<p>{line}</p>" for line in data.get("body", "").split("\n") if line.strip())
+                    body_html = _text_to_html(data.get("body", ""))
                     body_html += footer_html
                     subject = shared_subject if subject_mode == "Use the same subject for all" else data.get("subject", "")
                     db.new_message(user_id, pid, "EMAIL", subject, body_html, body_text)
@@ -422,7 +448,7 @@ elif page == "✉️ Messages":
                         if ok2:
                             for key, ftype in [("day7", "FOLLOW_UP_DAY7"), ("day14", "FOLLOW_UP_DAY14")]:
                                 bt = data2.get(key, "") + ("\n\n" + footer_text if footer_text else "")
-                                bh = "".join(f"<p>{line}</p>" for line in data2.get(key, "").split("\n") if line.strip())
+                                bh = _text_to_html(data2.get(key, ""))
                                 bh += footer_html
                                 db.new_message(user_id, pid, ftype, "", bh, bt)
                             status_msg += " Follow-ups generated too."
@@ -458,7 +484,7 @@ elif page == "✉️ Messages":
                     body_text = data.get("body", "") + ("\n\n" + footer_text if footer_text else "")
                     # Turn the AI's plain-text draft into simple HTML paragraphs
                     # so it opens correctly in the rich editor, then add the footer.
-                    body_html = "".join(f"<p>{line}</p>" for line in data.get("body", "").split("\n") if line.strip())
+                    body_html = _text_to_html(data.get("body", ""))
                     body_html += _footer_html(footer_text)
                     subject = custom_subject.strip() if custom_subject.strip() else data.get("subject", "")
                     db.new_message(user_id, prof_id, "EMAIL", subject, body_html, body_text)
@@ -474,7 +500,7 @@ elif page == "✉️ Messages":
                     footer_text = applicant.get("email_footer", "")
                     for key, label_ in [("day7", "FOLLOW_UP_DAY7"), ("day14", "FOLLOW_UP_DAY14")]:
                         body_text = data.get(key, "") + ("\n\n" + footer_text if footer_text else "")
-                        body_html = "".join(f"<p>{line}</p>" for line in data.get(key, "").split("\n") if line.strip())
+                        body_html = _text_to_html(data.get(key, ""))
                         body_html += _footer_html(footer_text)
                         db.new_message(user_id, prof_id, label_, "", body_html, body_text)
                     st.success(msg)
