@@ -54,6 +54,56 @@ def call_claude_json(system_prompt, user_prompt, max_tokens=1200):
 
 
 # ---------------------------------------------------------------------------
+# WEB-SEARCH LOOKUP FOR A SPECIFIC, ALREADY-NAMED PROFESSOR
+# This is a targeted lookup for one person you already have a name for —
+# not open-ended crawling or discovery of new people.
+# ---------------------------------------------------------------------------
+
+LOOKUP_SYSTEM_PROMPT = """You help find a specific, already-named professor's research area using
+web search. Only report what real search results actually say. If you can't find anything reliable
+for this specific person, say so honestly with an empty research_area rather than guessing or
+generalizing from the department's usual focus. Respond with ONLY a single valid JSON object, no
+markdown fences, no commentary."""
+
+
+def lookup_research_area(professor_name, university="", department=""):
+    """Uses Claude's web search tool to look up one specific professor's
+    research area. Returns (ok, message, research_area_string)."""
+    client = _get_client()
+    if client is None:
+        return False, "No API key connected yet.", ""
+
+    context = professor_name
+    if department:
+        context += f", {department}"
+    if university:
+        context += f", {university}"
+
+    user_prompt = f"""
+Search the web to find the research area/interests of this specific professor: {context}.
+
+Return ONLY:
+{{"research_area": "string, a short phrase (a few words to one sentence), or empty string if nothing reliable was found"}}
+"""
+    try:
+        resp = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=1000,
+            system=LOOKUP_SYSTEM_PROMPT,
+            tools=[{"type": "web_search_20250305", "name": "web_search"}],
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+        text = "".join(block.text for block in resp.content if getattr(block, "type", None) == "text")
+        data = _extract_json(text)
+        area = (data.get("research_area") or "").strip()
+        if area:
+            return True, "Found.", area
+        return True, "Nothing reliable found for this person.", ""
+    except Exception as e:
+        return False, f"Lookup failed: {e}", ""
+
+
+# ---------------------------------------------------------------------------
 # OUTREACH EMAIL GENERATION
 # Grounded directly on the professor's basic fields (name, university,
 # department, research area) — no separate research step required. Since
